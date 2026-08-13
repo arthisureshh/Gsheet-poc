@@ -77,6 +77,15 @@
     .status-bar { font-size: 0.78rem; color: #94a3b8; margin-top: 0.5rem; min-height: 1.2em; }
     .status-bar.error { color: #ef4444; }
     .status-bar.success { color: #16a34a; }
+    .diff-added { background:#dcfce7; color:#15803d; }
+    .diff-removed { background:#fee2e2; color:#dc2626; text-decoration:line-through; }
+    .diff-unchanged { background:#f8fafc; color:#64748b; }
+    .diff-header { font-size:0.72rem; font-weight:600; padding:6px 10px; background:#f1f5f9; border-bottom:1px solid #e2e8f0; color:#475569; }
+    .diff-row { padding:5px 10px; font-family:monospace; font-size:0.75rem; line-height:1.5; white-space:pre-wrap; word-break:break-all; border-bottom:1px solid #f1f5f9; }
+    .diff-row:last-child { border-bottom:none; }
+    .diff-legend { display:flex; gap:1rem; font-size:0.72rem; margin-bottom:0.75rem; }
+    .diff-legend span { display:flex; align-items:center; gap:4px; }
+    .diff-legend .dot { width:10px; height:10px; border-radius:50%; }
   </style>
 </head>
 <body>
@@ -88,16 +97,32 @@
   <!-- Sidebar -->
   <aside class="sidebar">
     <div class="sidebar-section">
-      <h2>Upload File</h2>
-      <div class="upload-zone" id="dropZone">
-        <input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.tsv" />
-        <p>Drop file here or click to browse</p>
-        <p class="ext">.xlsx · .xls · .csv · .tsv</p>
+      <h2>Upload Files</h2>
+      <div style="display:flex; flex-direction:column; gap:0.5rem;">
+        <div>
+          <div style="font-size:0.72rem; color:#94a3b8; margin-bottom:4px;">V1 — Original</div>
+          <div class="upload-zone" id="dropZone1">
+            <input type="file" id="fileInput1" accept=".xlsx,.xls,.csv,.tsv" />
+            <p id="fileLabel1">Drop or click to browse</p>
+            <p class="ext">.xlsx · .xls · .csv · .tsv</p>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:0.72rem; color:#94a3b8; margin-bottom:4px;">V2 — Modified <span style="color:#cbd5e1">(optional)</span></div>
+          <div class="upload-zone" id="dropZone2">
+            <input type="file" id="fileInput2" accept=".xlsx,.xls,.csv,.tsv" />
+            <p id="fileLabel2">Drop or click to browse</p>
+            <p class="ext">.xlsx · .xls · .csv · .tsv</p>
+          </div>
+        </div>
       </div>
       <div style="margin-top:0.75rem; display:flex; align-items:center; gap:0.5rem;">
         <button class="btn btn-primary" id="uploadBtn" disabled>
           <span id="uploadSpinner" style="display:none" class="spinner"></span>
-          Upload & Index
+          <span id="uploadBtnLabel">Index V1</span>
+        </button>
+        <button class="btn" id="diffBtn" style="display:none; background:#f0fdf4; color:#15803d; border:1px solid #bbf7d0;">
+          Show Diff
         </button>
       </div>
       <div class="status-bar" id="uploadStatus"></div>
@@ -134,64 +159,151 @@
 </div>
 
 <script>
-  let selectedFile = null;
+  let selectedFile1 = null;
+  let selectedFile2 = null;
   let currentFileName = null;
   let activeSchemaId = null;
+  let v1FileId = null;  // set after V1 indexed, used as base_file_id for V2
+  let v1Indexed = false;
 
-  const dropZone = document.getElementById('dropZone');
-  const fileInput = document.getElementById('fileInput');
-  const uploadBtn = document.getElementById('uploadBtn');
+  const uploadBtn    = document.getElementById('uploadBtn');
+  const uploadBtnLabel = document.getElementById('uploadBtnLabel');
+  const diffBtn      = document.getElementById('diffBtn');
   const uploadStatus = document.getElementById('uploadStatus');
-  const schemaList = document.getElementById('schemaList');
-  const queryInput = document.getElementById('queryInput');
-  const queryBtn = document.getElementById('queryBtn');
-  const queryStatus = document.getElementById('queryStatus');
-  const resultsArea = document.getElementById('resultsArea');
+  const schemaList   = document.getElementById('schemaList');
+  const queryInput   = document.getElementById('queryInput');
+  const queryBtn     = document.getElementById('queryBtn');
+  const queryStatus  = document.getElementById('queryStatus');
+  const resultsArea  = document.getElementById('resultsArea');
   const modeIndicator = document.getElementById('modeIndicator');
 
-  dropZone.addEventListener('click', () => fileInput.click());
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
-  dropZone.addEventListener('drop', e => {
-    e.preventDefault(); dropZone.classList.remove('drag');
-    const f = e.dataTransfer.files[0];
-    if (f) setFile(f);
-  });
-  fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+  function wireZone(zoneId, inputId, labelId, slot) {
+    const zone  = document.getElementById(zoneId);
+    const input = document.getElementById(inputId);
+    zone.addEventListener('click', () => input.click());
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+    zone.addEventListener('drop', e => {
+      e.preventDefault(); zone.classList.remove('drag');
+      const f = e.dataTransfer.files[0];
+      if (f) setFile(f, slot, labelId);
+    });
+    input.addEventListener('change', () => { if (input.files[0]) setFile(input.files[0], slot, labelId); });
+  }
 
-  function setFile(f) {
-    selectedFile = f;
-    uploadBtn.disabled = false;
-    uploadStatus.textContent = `Selected: ${f.name}`;
+  wireZone('dropZone1', 'fileInput1', 'fileLabel1', 1);
+  wireZone('dropZone2', 'fileInput2', 'fileLabel2', 2);
+
+  function setFile(f, slot, labelId) {
+    document.getElementById(labelId).textContent = f.name;
+    if (slot === 1) { selectedFile1 = f; v1Indexed = false; v1FileId = null; }
+    else            { selectedFile2 = f; }
+    updateUploadBtn();
+    diffBtn.style.display = (selectedFile1 && selectedFile2) ? 'inline-flex' : 'none';
+    uploadStatus.textContent = '';
     uploadStatus.className = 'status-bar';
   }
 
+  function updateUploadBtn() {
+    if (!selectedFile1) {
+      uploadBtn.disabled = true;
+      uploadBtnLabel.textContent = 'Index V1';
+    } else if (!v1Indexed) {
+      uploadBtn.disabled = false;
+      uploadBtnLabel.textContent = 'Index V1';
+    } else if (selectedFile2) {
+      uploadBtn.disabled = false;
+      uploadBtnLabel.textContent = 'Index V2 (diff)';
+    } else {
+      uploadBtn.disabled = true;
+      uploadBtnLabel.textContent = 'Index V1 ✓';
+    }
+  }
+
   uploadBtn.addEventListener('click', async () => {
-    if (!selectedFile) return;
+    const isV2 = v1Indexed && selectedFile2;
+    const file = isV2 ? selectedFile2 : selectedFile1;
+    if (!file) return;
+
     uploadBtn.disabled = true;
     document.getElementById('uploadSpinner').style.display = 'inline-block';
-    uploadStatus.textContent = 'Uploading and indexing…';
+    uploadStatus.textContent = isV2 ? 'Indexing V2 (diff against V1)…' : 'Indexing V1…';
     uploadStatus.className = 'status-bar';
 
-    const fd = new FormData();
-    fd.append('file', selectedFile);
-
     try {
+      const fd = new FormData();
+      fd.append('file', file);
+      if (isV2 && v1FileId) fd.append('base_file_id', v1FileId);
       const res = await fetch('/upload', { method: 'POST', body: fd });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       currentFileName = data.file_name;
-      uploadStatus.textContent = `✓ Indexed ${data.tables.length} table(s) from ${data.file_name}`;
+      if (!isV2) { v1FileId = data.file_id; v1Indexed = true; }
+      uploadStatus.textContent = `✓ Indexed ${data.tables.length} table(s) from ${data.file_name}${
+        isV2 ? ' (diff applied — only changed rows re-embedded)' : ''
+      }`;
       uploadStatus.className = 'status-bar success';
       renderSchemas(data.tables);
     } catch (e) {
       uploadStatus.textContent = `Error: ${e.message}`;
       uploadStatus.className = 'status-bar error';
     } finally {
-      uploadBtn.disabled = false;
       document.getElementById('uploadSpinner').style.display = 'none';
+      updateUploadBtn();
     }
   });
+
+  diffBtn.addEventListener('click', async () => {
+    if (!selectedFile1 || !selectedFile2) return;
+    diffBtn.disabled = true;
+    uploadStatus.textContent = 'Computing diff…';
+    uploadStatus.className = 'status-bar';
+    const fd = new FormData();
+    fd.append('v1', selectedFile1);
+    fd.append('v2', selectedFile2);
+    try {
+      const res = await fetch('/diff', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      uploadStatus.textContent = `✓ Diff complete — ${data.tables.length} table(s) compared`;
+      uploadStatus.className = 'status-bar success';
+      renderDiff(data.tables);
+    } catch (e) {
+      uploadStatus.textContent = `Error: ${e.message}`;
+      uploadStatus.className = 'status-bar error';
+    } finally {
+      diffBtn.disabled = false;
+    }
+  });
+
+  function renderDiff(tables) {
+    modeIndicator.innerHTML = '';
+    document.getElementById('jsonPanel').style.display = 'none';
+    resultsArea.style.display = 'block';
+    if (!tables.length) {
+      resultsArea.innerHTML = '<div class="empty-state">No tables to diff</div>';
+      return;
+    }
+    resultsArea.innerHTML = tables.map(t => {
+      const rows = t.rows.map(r => {
+        const cls = r.status === 'added' ? 'diff-added' : r.status === 'removed' ? 'diff-removed' : 'diff-unchanged';
+        const prefix = r.status === 'added' ? '+ ' : r.status === 'removed' ? '− ' : '  ';
+        return `<div class="diff-row ${cls}">${prefix}${escHtml(r.text)}</div>`;
+      }).join('');
+      return `<div class="schema-detail" style="padding:0; overflow:hidden;">
+        <div class="diff-header">
+          ${t.table_label || t.sheet_name}
+          &nbsp;·&nbsp;
+          <span style="color:#15803d">+${t.added} added</span>
+          &nbsp;
+          <span style="color:#dc2626">−${t.removed} removed</span>
+          &nbsp;
+          <span style="color:#64748b">${t.unchanged} unchanged</span>
+        </div>
+        ${rows}
+      </div>`;
+    }).join('');
+  }
 
   function typeClass(t) {
     return { number: 'type-number', date: 'type-date', category: 'type-category', text: 'type-text' }[t] || 'type-text';

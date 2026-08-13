@@ -1,22 +1,20 @@
 import uuid
-import hashlib
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 from elasticsearch import Elasticsearch
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from sentence_transformers import SentenceTransformer
 from backend.models import TableSchema, DetectedTable
-from backend.header_inference import row_to_text, batch_rows_into_chunks
+from backend.header_inference import row_to_text
 
-ES_SCHEMA_INDEX = "spreadsheet_schemas"
-ES_CHUNK_INDEX  = "spreadsheet_chunks"
+ES_SCHEMA_INDEX   = "spreadsheet_schemas"
+ES_CHUNK_INDEX    = "spreadsheet_chunks"
 QDRANT_COLLECTION = "spreadsheet_vectors"
 VECTOR_DIM  = 384
 BATCH_SIZE  = 32
 
 _model: SentenceTransformer | None = None
-_executor = ThreadPoolExecutor(max_workers=4)
 
 
 def _embed_model() -> SentenceTransformer:
@@ -32,25 +30,6 @@ def _es() -> Elasticsearch:
 
 def _qdrant() -> QdrantClient:
     return QdrantClient(host="localhost", port=6333)
-
-
-# ── Chunk identity (mirrors Paxi chunk_of = fileId:chunkId) ──────────────────
-
-@dataclass
-class DiffBlock:
-    chunk_id: str        # stable ES document _id
-    chunk_text: str
-    row_index: int       # sequential chunk number within the table
-    row_hash: str        # md5 of chunk_text — used for diff
-
-
-def _chunk_hash(text: str) -> str:
-    return hashlib.md5(text.encode()).hexdigest()
-
-
-def _chunk_of(file_id: str, chunk_id: str) -> str:
-    """Mirrors Paxi's chunk_of = fileId:chunkId payload field."""
-    return f"{file_id}:{chunk_id}"
 
 
 # ── ES / Qdrant setup ─────────────────────────────────────────────────────────
@@ -73,28 +52,33 @@ _CHUNK_MAPPINGS = {"properties": {
     "table_id":    {"type": "keyword"},
     "file_name":   {"type": "keyword"},
     "file_id":     {"type": "keyword"},
-    "chunk_of":    {"type": "keyword"},
     "sheet_name":  {"type": "keyword"},
     "region_index":{"type": "integer"},
-    "chunk_text":  {"type": "text"},
-    "row_hash":    {"type": "keyword"},
-    "row_index":   {"type": "integer"},
+    "chunk_id":    {"type": "integer"},   # sequential int, mirrors TS chunk_id counter
+    "chunk_text":  {"type": "keyword"},   # keyword for exact fetch
+    "chunk_text_search": {"type": "text"}, # copy for full-text search
 }}
+
+
+def _table_id_is_keyword(es: Elasticsearch, index: str) -> bool:
+    try:
+        m = es.indices.get_mapping(index=index)
+        props = m[index]["mappings"].get("properties", {})
+        return props.get("table_id", {}).get("type") == "keyword"
+    except Exception:
+        return False
 
 
 def ensure_indices():
     es = _es()
     for index, mappings in [(ES_SCHEMA_INDEX, _SCHEMA_MAPPINGS), (ES_CHUNK_INDEX, _CHUNK_MAPPINGS)]:
-        try:
-            es.indices.create(index=index, mappings=mappings, settings=_INDEX_SETTINGS)
-        except Exception as e:
-            if "resource_already_exists" not in str(e).lower() and "already exists" not in str(e).lower():
-                raise
-            # Index exists — ensure field limit is applied
-            try:
-                es.indices.put_settings(index=index, settings=_INDEX_SETTINGS)
-            except Exception:
-                pass
+        # Always delete and recreate to guarantee correct keyword mappings
+        # ES auto-mapping from first bulk write overrides explicit mappings if index pre-exists
+        if es.indices.exists(index=index):
+            if _table_id_is_keyword(es, index):
+                continue  # already correct, skip
+            es.indices.delete(index=index)
+        es.indices.create(index=index, mappings=mappings, settings=_INDEX_SETTINGS)
 
     qd = _qdrant()
     existing = [c.name for c in qd.get_collections().collections]
@@ -108,8 +92,9 @@ def _to_json_val(v) -> str:
     return str(v)
 
 
+# ── Schema index ──────────────────────────────────────────────────────────────
+
 def index_schema(schema: TableSchema):
-    es = _es()
     doc = {
         "table_id":     schema.table_id,
         "file_name":    schema.file_name,
@@ -121,190 +106,167 @@ def index_schema(schema: TableSchema):
         "sample_values":{k: [_to_json_val(v) for v in vals] for k, vals in schema.sample_values.items()},
         "source_range": schema.source_range,
     }
-    es.index(index=ES_SCHEMA_INDEX, id=schema.table_id, document=doc)
+    _es().index(index=ES_SCHEMA_INDEX, id=schema.table_id, document=doc)
 
 
-# ── Build chunks (TS pipeline port) ──────────────────────────────────────────
-
-def _build_diff_blocks(table: DetectedTable, schema: TableSchema) -> list[DiffBlock]:
-    """
-    Mirrors Paxi's chunkTableContentToMetadata + batchRowsIntoChunks.
-    Returns DiffBlock list — chunk_id assigned here as stable uuid based on content hash.
-    """
-    row_texts = [t for row in table.rows if (t := row_to_text(row, schema.headers))]
-    if not row_texts:
-        return []
-
-    chunk_texts = batch_rows_into_chunks(row_texts)
-    blocks = []
-    for i, chunk_text in enumerate(chunk_texts):
-        row_hash = _chunk_hash(chunk_text)
-        chunk_id = hashlib.md5(f"{schema.table_id}:{i}".encode()).hexdigest()
-        blocks.append(DiffBlock(
-            chunk_id=chunk_id,
-            chunk_text=chunk_text,
-            row_index=i,
-            row_hash=row_hash,
-        ))
-    return blocks
-
-
-# ── computeSheetDiff (mirrors Paxi's computeSheetDiff) ───────────────────────
+# ── DiffBlock — mirrors TS DiffBlock ─────────────────────────────────────────
 
 @dataclass
-class DiffResult:
-    to_index: list[DiffBlock]      # new or changed chunks → embed + store
-    delete_chunk_ids: list[str]    # stale ES doc IDs → delete from ES + Qdrant
+class DiffBlock:
+    text: str
+    chunk_id: int | None = None   # None for current (not yet indexed) blocks
 
 
-def _get_previous_blocks(table_id: str) -> list[DiffBlock]:
-    """Load previously indexed chunks from ES — mirrors Paxi's getChunksByFileId."""
+# ── compute_diff — mirrors TS computeDiff / diffArrays ───────────────────────
+
+def _compute_diff(
+    previous: list[DiffBlock],
+    current: list[DiffBlock],
+    starting_chunk_id: int,
+) -> tuple[list[tuple[int, str]], list[int]]:
+    """
+    Positional diff using SequenceMatcher (mirrors TS diffArrays).
+    Returns:
+      to_index: [(chunk_id, chunk_text), ...]  — new/changed chunks to embed
+      to_delete: [chunk_id, ...]               — removed chunk_ids to delete
+    """
+    prev_texts = [b.text.strip() for b in previous]
+    curr_texts = [b.text.strip() for b in current]
+
+    matcher = SequenceMatcher(None, prev_texts, curr_texts, autojunk=False)
+
+    to_index: list[tuple[int, str]] = []
+    to_delete: list[int] = []
+    next_chunk_id = starting_chunk_id
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+
+        elif tag == "delete":
+            for block in previous[i1:i2]:
+                if block.chunk_id is not None:
+                    to_delete.append(block.chunk_id)
+
+        elif tag == "insert":
+            for block in current[j1:j2]:
+                to_index.append((next_chunk_id, block.text))
+                next_chunk_id += 1
+
+        elif tag == "replace":
+            for block in previous[i1:i2]:
+                if block.chunk_id is not None:
+                    to_delete.append(block.chunk_id)
+            for block in current[j1:j2]:
+                to_index.append((next_chunk_id, block.text))
+                next_chunk_id += 1
+
+    return to_index, to_delete
+
+
+# ── Fetch stored chunks for a table ──────────────────────────────────────────
+
+def _get_stored_blocks(table_id: str) -> list[DiffBlock]:
+    """
+    Returns previous DiffBlocks ordered by chunk_id.
+    chunk_id is the sequential int stored in ES.
+    """
     try:
         res = _es().search(
             index=ES_CHUNK_INDEX,
-            query={"bool": {"must": [
-                {"term": {"table_id.keyword": table_id}},
-                {"range": {"row_index": {"gte": 0}}},
-            ]}},
-            _source=["chunk_text", "md_text", "row_index", "row_hash", "chunk_of"],
+            query={"term": {"table_id": str(table_id)}},
+            _source=["chunk_id", "chunk_text"],
             size=10000,
-            sort=[{"row_index": "asc"}],
+            sort=[{"chunk_id": "asc"}],
         )
-        blocks = []
-        for h in res["hits"]["hits"]:
-            s = h["_source"]
-            # chunk_id is the ES doc _id
-            blocks.append(DiffBlock(
-                chunk_id=h["_id"],
-                chunk_text=s.get("chunk_text", ""),
-                row_index=s.get("row_index", 0),
-                row_hash=s.get("row_hash", ""),
-            ))
-        return blocks
+        return [
+            DiffBlock(text=h["_source"]["chunk_text"], chunk_id=int(h["_source"]["chunk_id"]))
+            for h in res["hits"]["hits"]
+        ]
     except Exception:
+        import traceback; traceback.print_exc()
         return []
 
 
-def compute_sheet_diff(previous: list[DiffBlock], current: list[DiffBlock]) -> DiffResult:
-    """
-    Text-level diff — mirrors Paxi's computeSheetDiff / computeDiff.
-
-    Strategy:
-    - Build a map of previous chunks by row_hash
-    - Current chunks whose hash exists in previous → unchanged, skip
-    - Current chunks whose hash is new → to_index
-    - Previous chunk IDs not matched by any current chunk → delete_chunk_ids
-    """
-    prev_by_hash: dict[str, DiffBlock] = {b.row_hash: b for b in previous}
-    current_hashes = {b.row_hash for b in current}
-
-    to_index: list[DiffBlock] = []
-    for block in current:
-        if block.row_hash not in prev_by_hash:
-            to_index.append(block)  # new or changed
-
-    delete_chunk_ids: list[str] = [
-        b.chunk_id for b in previous if b.row_hash not in current_hashes
-    ]
-
-    return DiffResult(to_index=to_index, delete_chunk_ids=delete_chunk_ids)
-
-
-# ── Delete stale chunks (mirrors Paxi's deleteByQuery + deleteByFilter) ───────
-
-def _delete_chunks_by_ids(chunk_ids: list[str]):
-    """Delete specific chunk IDs from ES + Qdrant — mirrors Paxi's stale chunk deletion."""
-    if not chunk_ids:
-        return
-    es = _es()
-    qd = _qdrant()
-    # ES: delete by _id
+def _get_next_chunk_id(table_id: str) -> int:
+    """Returns max(chunk_id) + 1 for this table, or 0 if none stored."""
     try:
-        es.delete_by_query(
+        res = _es().search(
             index=ES_CHUNK_INDEX,
-            query={"ids": {"values": chunk_ids}},
-            refresh=True,
+            query={"term": {"table_id": str(table_id)}},
+            aggs={"max_id": {"max": {"field": "chunk_id"}}},
+            size=0,
         )
+        val = res["aggregations"]["max_id"]["value"]
+        return int(val) + 1 if val is not None else 0
     except Exception:
-        pass
-    # Qdrant: delete by chunk_id payload field
-    for cid in chunk_ids:
-        try:
-            qd.delete(
-                collection_name=QDRANT_COLLECTION,
-                points_selector=Filter(must=[
-                    FieldCondition(key="chunk_id", match=MatchValue(value=cid))
-                ]),
-            )
-        except Exception:
-            pass
+        import traceback; traceback.print_exc()
+        return 0
 
-
-def _delete_all_table_chunks(table_id: str):
-    """Full wipe for a table — used on first upload (no previous state)."""
-    try:
-        _es().delete_by_query(
-            index=ES_CHUNK_INDEX,
-            query={"term": {"table_id.keyword": table_id}},
-            refresh=True,
-        )
-        _qdrant().delete(
-            collection_name=QDRANT_COLLECTION,
-            points_selector=Filter(must=[
-                FieldCondition(key="table_id", match=MatchValue(value=table_id))
-            ]),
-        )
-    except Exception:
-        pass
-
-
-# ── Embed + store (mirrors Paxi's VectorizeProcessor) ────────────────────────
 
 def _ensure_qdrant_collection():
+    """Recreate Qdrant collection if missing — called before any read/write."""
     qd = _qdrant()
     existing = [c.name for c in qd.get_collections().collections]
     if QDRANT_COLLECTION not in existing:
         qd.create_collection(QDRANT_COLLECTION, vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE))
 
 
-def _embed_and_store(blocks: list[DiffBlock], schema: TableSchema):
-    """
-    Mirrors Paxi's VectorizeProcessor:
-    - Batch embed chunk_text
-    - Upsert to Qdrant (vector store)
-    - Bulk index to ES (event store)
-    """
-    if not blocks:
+# ── Delete chunks by chunk_id ─────────────────────────────────────────────────
+
+def _delete_chunks(table_id: str, chunk_ids: list[int]):
+    if not chunk_ids:
+        return
+    _ensure_qdrant_collection()
+    # ES: delete all matching chunk_ids in one query
+    _es().delete_by_query(
+        index=ES_CHUNK_INDEX,
+        query={"bool": {"must": [
+            {"term": {"table_id": str(table_id)}},
+            {"terms": {"chunk_id": [int(c) for c in chunk_ids]}},
+        ]}},
+        refresh=True,
+    )
+    # Qdrant: batch delete all chunk_ids in one filter using should
+    _qdrant().delete(
+        collection_name=QDRANT_COLLECTION,
+        points_selector=Filter(
+            must=[FieldCondition(key="table_id", match=MatchValue(value=str(table_id)))],
+            should=[FieldCondition(key="chunk_id", match=MatchValue(value=int(cid))) for cid in chunk_ids],
+        ),
+    )
+
+
+# ── Embed + store new chunks ──────────────────────────────────────────────────
+
+def _embed_and_store(to_index: list[tuple[int, str]], schema: TableSchema, sheet_name: str):
+    if not to_index:
         return
 
-    _ensure_qdrant_collection()
     es = _es()
     qd = _qdrant()
     model = _embed_model()
     region_idx = int(schema.table_id.split(":")[-1])
-    sheet_name = schema.source_range.split("!")[0]
 
-    texts = [b.chunk_text for b in blocks]
+    texts = [ct for _, ct in to_index]
     vectors = []
     for start in range(0, len(texts), BATCH_SIZE):
-        batch = texts[start: start + BATCH_SIZE]
-        vectors.extend(model.encode(batch, show_progress_bar=False).tolist())
+        vectors.extend(model.encode(texts[start: start + BATCH_SIZE], show_progress_bar=False).tolist())
 
     es_ops = []
     qdrant_points = []
-    for block, vector in zip(blocks, vectors):
-        chunk_of = _chunk_of(schema.file_id, block.chunk_id)
-        es_ops.append({"index": {"_index": ES_CHUNK_INDEX, "_id": block.chunk_id}})
+    for (chunk_id, chunk_text), vector in zip(to_index, vectors):
+        doc_id = str(uuid.uuid4())
+        es_ops.append({"index": {"_index": ES_CHUNK_INDEX, "_id": doc_id}})
         es_ops.append({
-            "table_id":     schema.table_id,
-            "file_name":    schema.file_name,
-            "file_id":      schema.file_id,
-            "chunk_of":     chunk_of,
-            "sheet_name":   sheet_name,
-            "region_index": region_idx,
-            "chunk_text":   block.chunk_text,
-            "row_hash":     block.row_hash,
-            "row_index":    block.row_index,
+            "table_id":          schema.table_id,
+            "file_name":         schema.file_name,
+            "file_id":           schema.file_id,
+            "sheet_name":        sheet_name,
+            "region_index":      region_idx,
+            "chunk_id":          chunk_id,
+            "chunk_text":        chunk_text,
+            "chunk_text_search": chunk_text,
         })
         qdrant_points.append(PointStruct(
             id=str(uuid.uuid4()),
@@ -312,45 +274,43 @@ def _embed_and_store(blocks: list[DiffBlock], schema: TableSchema):
             payload={
                 "table_id":   schema.table_id,
                 "file_id":    schema.file_id,
-                "chunk_id":   block.chunk_id,
-                "chunk_of":   chunk_of,
-                "region_index": region_idx,
-                "chunk_text": block.chunk_text,
-                "row_hash":   block.row_hash,
+                "chunk_id":   chunk_id,
+                "chunk_text": chunk_text,
             },
         ))
 
     if es_ops:
-        es.bulk(operations=es_ops)
+        es.bulk(operations=es_ops, refresh=True)
     if qdrant_points:
+        _ensure_qdrant_collection()
         qd.upsert(collection_name=QDRANT_COLLECTION, points=qdrant_points)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def index_chunks(table: DetectedTable, schema: TableSchema, incremental: bool = True):
+def index_chunks(table: DetectedTable, schema: TableSchema):
     """
-    Main entry point — mirrors Paxi's full diff + index + delete flow:
-
-    1. Build current DiffBlocks from table rows (chunkTableContentToMetadata + batchRowsIntoChunks)
-    2. Load previous DiffBlocks from ES (getChunksByFileId)
-    3. computeSheetDiff → to_index + delete_chunk_ids
-    4. _embed_and_store(to_index)   ← VectorizeProcessor
-    5. _delete_chunks_by_ids(delete_chunk_ids)  ← deleteByQuery + deleteByFilter
+    Chunk-level diff using SequenceMatcher (mirrors TS computeSheetDiff / diffArrays):
+      equal   → skip
+      insert  → embed + store new chunks
+      delete  → delete old chunks from ES + Qdrant
+      replace → delete old + embed new (changed chunk)
     """
     if not table.rows or not schema.headers:
         return
 
-    current_blocks = _build_diff_blocks(table, schema)
-    if not current_blocks:
+    sheet_name = schema.source_range.split("!")[0]
+    row_texts = [t for row in table.rows if (t := row_to_text(row, schema.headers))]
+    if not row_texts:
         return
 
-    if incremental:
-        previous_blocks = _get_previous_blocks(schema.table_id)
-        diff = compute_sheet_diff(previous_blocks, current_blocks)
-        _embed_and_store(diff.to_index, schema)
-        _delete_chunks_by_ids(diff.delete_chunk_ids)
-    else:
-        # First upload — wipe and index everything
-        _delete_all_table_chunks(schema.table_id)
-        _embed_and_store(current_blocks, schema)
+    current_blocks = [DiffBlock(text=rt) for rt in row_texts]
+    previous_blocks = _get_stored_blocks(schema.table_id)
+    starting_chunk_id = _get_next_chunk_id(schema.table_id)
+
+    to_index, to_delete = _compute_diff(previous_blocks, current_blocks, starting_chunk_id)
+
+    print(f"[diff] {schema.table_id}: prev={len(previous_blocks)} curr={len(current_blocks)} to_index={len(to_index)} to_delete={len(to_delete)}")
+
+    _delete_chunks(schema.table_id, to_delete)
+    _embed_and_store(to_index, schema, sheet_name)
