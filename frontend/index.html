@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Spreadsheet</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f8fafc; color: #1e293b; min-height: 100vh; }
+    header { padding: 1.2rem 2rem; background: #ffffff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 1rem; box-shadow: 0 1px 3px #0000000a; }
+    header h1 { font-size: 1.1rem; font-weight: 600; color: #6d28d9; }
+    .badge { font-size: 0.7rem; background: #ede9fe; padding: 2px 8px; border-radius: 99px; color: #7c3aed; }
+    .layout { display: grid; grid-template-columns: 340px 1fr; height: calc(100vh - 57px); }
+    .sidebar { background: #ffffff; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column; overflow: hidden; }
+    .sidebar-section { padding: 1rem; border-bottom: 1px solid #e2e8f0; }
+    .sidebar-section h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 0.75rem; }
+    .upload-zone { border: 2px dashed #cbd5e1; border-radius: 8px; padding: 1.5rem; text-align: center; cursor: pointer; transition: border-color 0.2s; background: #f8fafc; }
+    .upload-zone:hover, .upload-zone.drag { border-color: #7c3aed; background: #f5f3ff; }
+    .upload-zone input { display: none; }
+    .upload-zone p { font-size: 0.85rem; color: #94a3b8; }
+    .upload-zone .ext { font-size: 0.75rem; color: #cbd5e1; margin-top: 4px; }
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 0.45rem 1rem; border-radius: 6px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 500; transition: background 0.15s; }
+    .btn-primary { background: #7c3aed; color: #fff; }
+    .btn-primary:hover { background: #6d28d9; }
+    .btn-primary:disabled { background: #ddd6fe; color: #a78bfa; cursor: not-allowed; }
+    .schema-list { overflow-y: auto; flex: 1; padding: 0.5rem; }
+    .schema-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem; cursor: pointer; transition: border-color 0.15s; box-shadow: 0 1px 2px #0000000a; }
+    .schema-card:hover, .schema-card.active { border-color: #7c3aed; background: #faf5ff; }
+    .schema-card .label { font-size: 0.85rem; font-weight: 600; color: #6d28d9; }
+    .schema-card .meta { font-size: 0.72rem; color: #94a3b8; margin-top: 3px; }
+    .schema-card .cols { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .schema-card .card-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .btn-xs { font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; border: 1px solid #e2e8f0; background: #f8fafc; color: #64748b; cursor: pointer; }
+    .btn-xs:hover { background: #ede9fe; color: #7c3aed; border-color: #c4b5fd; }
+    .drawer { position: fixed; top: 0; right: -520px; width: 520px; height: 100vh; background: #ffffff; border-left: 1px solid #e2e8f0; z-index: 100; display: flex; flex-direction: column; transition: right 0.25s ease; box-shadow: -4px 0 16px #0000001a; }
+    .drawer.open { right: 0; }
+    .drawer-header { padding: 1rem 1.25rem; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center; background: #faf5ff; }
+    .drawer-header h3 { font-size: 0.85rem; color: #6d28d9; }
+    .drawer-close { background: none; border: none; color: #94a3b8; font-size: 1.2rem; cursor: pointer; line-height: 1; }
+    .drawer-close:hover { color: #1e293b; }
+    .drawer-body { flex: 1; overflow-y: auto; padding: 1rem; background: #f8fafc; }
+    .chunk-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; margin-bottom: 0.6rem; overflow: hidden; box-shadow: 0 1px 2px #0000000a; }
+    .chunk-card-header { padding: 6px 10px; background: #f1f5f9; font-size: 0.72rem; color: #64748b; border-bottom: 1px solid #e2e8f0; }
+    .chunk-body { padding: 8px 10px; font-family: monospace; font-size: 0.75rem; line-height: 1.6; color: #0f766e; white-space: pre-wrap; word-break: break-all; }
+    .overlay { display: none; position: fixed; inset: 0; background: #00000033; z-index: 99; }
+    .overlay.show { display: block; }
+    .col-tag { font-size: 0.68rem; padding: 1px 6px; border-radius: 4px; }
+    .type-number { background: #dbeafe; color: #1d4ed8; }
+    .type-date { background: #dcfce7; color: #15803d; }
+    .type-category { background: #fef9c3; color: #a16207; }
+    .type-text { background: #f1f5f9; color: #475569; }
+    .main { display: flex; flex-direction: column; overflow: hidden; }
+    .query-panel { padding: 1.25rem 1.5rem; border-bottom: 1px solid #e2e8f0; background: #ffffff; }
+    .query-panel h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 0.75rem; }
+    .query-row { display: flex; gap: 0.5rem; }
+    .query-input { flex: 1; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 0.55rem 0.9rem; color: #1e293b; font-size: 0.9rem; outline: none; }
+    .query-input:focus { border-color: #7c3aed; background: #ffffff; }
+    .mode-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 0.72rem; padding: 2px 8px; border-radius: 99px; margin-top: 0.5rem; }
+    .mode-dataframe { background: #dbeafe; color: #1d4ed8; }
+    .mode-vector { background: #dcfce7; color: #15803d; }
+    .mode-keyword { background: #fef9c3; color: #a16207; }
+    .mode-no_data { background: #f1f5f9; color: #64748b; }
+    .results-area { flex: 1; overflow-y: auto; padding: 1.25rem 1.5rem; background: #f8fafc; }
+    .result-item { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.85rem 1rem; margin-bottom: 0.6rem; font-size: 0.85rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word; box-shadow: 0 1px 2px #0000000a; color: #1e293b; }
+    .result-item .score { font-size: 0.7rem; color: #94a3b8; margin-top: 4px; }
+    .schema-detail { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 1px 2px #0000000a; }
+    .schema-detail h3 { font-size: 0.85rem; color: #6d28d9; margin-bottom: 0.5rem; }
+    .schema-detail table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    .schema-detail th { text-align: left; color: #94a3b8; padding: 4px 8px; border-bottom: 1px solid #e2e8f0; }
+    .schema-detail td { padding: 4px 8px; border-bottom: 1px solid #f1f5f9; color: #1e293b; }
+    .empty-state { text-align: center; padding: 3rem; color: #cbd5e1; font-size: 0.9rem; }
+    .view-tabs { display: flex; gap: 4px; margin-bottom: 0.75rem; }
+    .view-tab { padding: 4px 12px; border-radius: 5px; border: 1px solid #e2e8f0; background: #f8fafc; color: #64748b; font-size: 0.78rem; cursor: pointer; }
+    .view-tab.active { background: #ede9fe; color: #7c3aed; border-color: #c4b5fd; }
+    .json-block { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.78rem; line-height: 1.6; color: #0f766e; white-space: pre; overflow-x: auto; margin-bottom: 0.6rem; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #e2e8f0; border-top-color: #7c3aed; border-radius: 50%; animation: spin 0.6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .status-bar { font-size: 0.78rem; color: #94a3b8; margin-top: 0.5rem; min-height: 1.2em; }
+    .status-bar.error { color: #ef4444; }
+    .status-bar.success { color: #16a34a; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Spreadsheet</h1>
+</header>
+
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <h2>Upload File</h2>
+      <div class="upload-zone" id="dropZone">
+        <input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.tsv" />
+        <p>Drop file here or click to browse</p>
+        <p class="ext">.xlsx · .xls · .csv · .tsv</p>
+      </div>
+      <div style="margin-top:0.75rem; display:flex; align-items:center; gap:0.5rem;">
+        <button class="btn btn-primary" id="uploadBtn" disabled>
+          <span id="uploadSpinner" style="display:none" class="spinner"></span>
+          Upload & Index
+        </button>
+      </div>
+      <div class="status-bar" id="uploadStatus"></div>
+    </div>
+
+    <div class="sidebar-section" style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
+      <h2>Detected Tables</h2>
+      <div class="schema-list" id="schemaList">
+        <div class="empty-state">Upload a file to see detected tables</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <div class="query-panel">
+      <h2>Query</h2>
+      <div class="query-row">
+        <input class="query-input" id="queryInput" placeholder='e.g. "how many items are overdue?" or "summarize sprint progress"' />
+        <button class="btn btn-primary" id="queryBtn">
+          <span id="querySpinner" style="display:none" class="spinner"></span>
+          Ask
+        </button>
+      </div>
+      <div id="modeIndicator"></div>
+      <div class="status-bar" id="queryStatus"></div>
+    </div>
+
+    <div class="results-area" id="resultsArea">
+      <div class="empty-state">Results will appear here after you ask a question</div>
+    </div>
+    <div id="jsonPanel" style="display:none; flex:1; overflow-y:auto; padding:1.25rem 1.5rem; background:#f8fafc;"></div>
+  </main>
+</div>
+
+<script>
+  let selectedFile = null;
+  let currentFileName = null;
+  let activeSchemaId = null;
+
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const uploadStatus = document.getElementById('uploadStatus');
+  const schemaList = document.getElementById('schemaList');
+  const queryInput = document.getElementById('queryInput');
+  const queryBtn = document.getElementById('queryBtn');
+  const queryStatus = document.getElementById('queryStatus');
+  const resultsArea = document.getElementById('resultsArea');
+  const modeIndicator = document.getElementById('modeIndicator');
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('drag');
+    const f = e.dataTransfer.files[0];
+    if (f) setFile(f);
+  });
+  fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+
+  function setFile(f) {
+    selectedFile = f;
+    uploadBtn.disabled = false;
+    uploadStatus.textContent = `Selected: ${f.name}`;
+    uploadStatus.className = 'status-bar';
+  }
+
+  uploadBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+    uploadBtn.disabled = true;
+    document.getElementById('uploadSpinner').style.display = 'inline-block';
+    uploadStatus.textContent = 'Uploading and indexing…';
+    uploadStatus.className = 'status-bar';
+
+    const fd = new FormData();
+    fd.append('file', selectedFile);
+
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      currentFileName = data.file_name;
+      uploadStatus.textContent = `✓ Indexed ${data.tables.length} table(s) from ${data.file_name}`;
+      uploadStatus.className = 'status-bar success';
+      renderSchemas(data.tables);
+    } catch (e) {
+      uploadStatus.textContent = `Error: ${e.message}`;
+      uploadStatus.className = 'status-bar error';
+    } finally {
+      uploadBtn.disabled = false;
+      document.getElementById('uploadSpinner').style.display = 'none';
+    }
+  });
+
+  function typeClass(t) {
+    return { number: 'type-number', date: 'type-date', category: 'type-category', text: 'type-text' }[t] || 'type-text';
+  }
+
+  function renderSchemas(tables) {
+    if (!tables.length) { schemaList.innerHTML = '<div class="empty-state">No tables detected</div>'; return; }
+    schemaList.innerHTML = '';
+    tables.forEach(t => {
+      const card = document.createElement('div');
+      card.className = 'schema-card';
+      card.dataset.id = t.table_id;
+      const label = t.table_label || t.sheet_name || t.table_id;
+      const colTags = t.headers.map(h => {
+        const ct = (t.column_types || {})[h] || 'text';
+        return `<span class="col-tag ${typeClass(ct)}">${h}</span>`;
+      }).join('');
+      card.innerHTML = `
+        <div class="label">${label}</div>
+        <div class="meta">${t.row_count} rows · ${t.source_range}</div>
+        <div class="cols">${colTags}</div>
+        <div class="card-actions">
+          <button class="btn-xs" onclick="event.stopPropagation(); openChunks('${t.table_id}', '${(t.table_label || t.sheet_name || '').replace(/'/g, '')}')">📦 View Chunks</button>
+        </div>`;
+      card.addEventListener('click', () => {
+        document.querySelectorAll('.schema-card').forEach(c => c.classList.remove('active'));
+        card.classList.add('active');
+        activeSchemaId = t.table_id;
+        showSchemaDetail(t);
+      });
+      schemaList.appendChild(card);
+    });
+  }
+
+  function showSchemaDetail(t) {
+    const rows = t.headers.map(h => {
+      const ct = (t.column_types || {})[h] || 'text';
+      const samples = ((t.sample_values || {})[h] || []).join(', ');
+      return `<tr><td>${h}</td><td><span class="col-tag ${typeClass(ct)}">${ct}</span></td><td style="color:#64748b">${samples}</td></tr>`;
+    }).join('');
+    resultsArea.innerHTML = `
+      <div class="schema-detail">
+        <h3>📋 ${t.table_label || t.sheet_name} — Schema</h3>
+        <table>
+          <thead><tr><th>Column</th><th>Type</th><th>Sample Values</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="empty-state" style="padding:1.5rem">Ask a question about this table above ↑</div>`;
+    modeIndicator.innerHTML = '';
+  }
+
+  queryBtn.addEventListener('click', runQuery);
+  queryInput.addEventListener('keydown', e => { if (e.key === 'Enter') runQuery(); });
+
+  async function runQuery() {
+    const q = queryInput.value.trim();
+    if (!q) return;
+    queryBtn.disabled = true;
+    document.getElementById('querySpinner').style.display = 'inline-block';
+    queryStatus.textContent = 'Querying…';
+    modeIndicator.innerHTML = '';
+
+    try {
+      const res = await fetch('/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q, file_name: currentFileName }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      renderResults(data);
+      queryStatus.textContent = '';
+    } catch (e) {
+      queryStatus.textContent = `Error: ${e.message}`;
+      queryStatus.className = 'status-bar error';
+    } finally {
+      queryBtn.disabled = false;
+      document.getElementById('querySpinner').style.display = 'none';
+    }
+  }
+
+  let lastQueryData = null;
+
+  function renderResults(data) {
+    lastQueryData = data;
+    const modeLabels = { dataframe: '🔢 DataFrame Query', vector: '🔍 Vector Search', keyword: '🔑 Keyword Search', no_data: '⚠ No Data' };
+    modeIndicator.innerHTML = `
+      <span class="mode-badge mode-${data.mode}">${modeLabels[data.mode] || data.mode}</span>
+      <span style="margin-left:8px">
+        <span class="view-tab active" id="tabResults" onclick="switchTab('results')">Results</span>
+        <span class="view-tab" id="tabJson" onclick="switchTab('json')">JSON</span>
+      </span>`;
+
+    document.getElementById('jsonPanel').style.display = 'none';
+    resultsArea.style.display = 'block';
+
+    if (data.message) {
+      resultsArea.innerHTML = `<div class="result-item">${data.message}</div>`;
+      return;
+    }
+
+    let schemaHtml = '';
+    if (data.schema) {
+      const s = data.schema;
+      const colTags = (s.headers || []).map(h => {
+        const ct = (s.column_types || {})[h] || 'text';
+        return `<span class="col-tag ${typeClass(ct)}">${h}</span>`;
+      }).join(' ');
+      schemaHtml = `<div style="margin-bottom:0.75rem; font-size:0.78rem; color:#64748b">
+        Table: <strong style="color:#6d28d9">${s.table_label || s.table_id}</strong> · ${s.row_count} rows<br/>
+        <div style="margin-top:4px">${colTags}</div>
+      </div>`;
+    }
+
+    const items = (data.results || []).map(r => {
+      const score = r.score != null ? `<div class="score">similarity: ${r.score.toFixed(3)}</div>` : '';
+      return `<div class="result-item">${r.chunk_text}${score}</div>`;
+    }).join('');
+
+    resultsArea.innerHTML = schemaHtml + (items || '<div class="empty-state">No results found</div>');
+  }
+
+  function switchTab(tab) {
+    document.getElementById('tabResults').classList.toggle('active', tab === 'results');
+    document.getElementById('tabJson').classList.toggle('active', tab === 'json');
+    resultsArea.style.display = tab === 'results' ? 'block' : 'none';
+    const jsonPanel = document.getElementById('jsonPanel');
+    jsonPanel.style.display = tab === 'json' ? 'block' : 'none';
+    if (tab === 'json' && lastQueryData) {
+      const chunks = (lastQueryData.results || []).map((r, i) => ({
+        chunk_index: i,
+        chunk_text: r.chunk_text,
+        ...(r.score != null ? { score: r.score } : {}),
+        ...(r.md_text ? { md_text: r.md_text } : {}),
+        mode: lastQueryData.mode,
+        table_id: lastQueryData.table_id,
+      }));
+      jsonPanel.innerHTML = chunks.map(c =>
+        `<div class="json-block">${JSON.stringify(c, null, 2)}</div>`
+      ).join('') || '<div class="empty-state">No chunks</div>';
+    }
+  }
+  // ── Chunk drawer ──────────────────────────────────────────────────────────
+  const drawer = document.createElement('div');
+  drawer.className = 'drawer';
+  drawer.innerHTML = `
+    <div class="drawer-header">
+      <h3 id="drawerTitle">Chunks</h3>
+      <button class="drawer-close" onclick="closeChunks()">&times;</button>
+    </div>
+    <div class="drawer-body" id="drawerBody"><div class="empty-state">Loading…</div></div>`;
+  document.body.appendChild(drawer);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.onclick = closeChunks;
+  document.body.appendChild(overlay);
+
+  async function openChunks(tableId, label) {
+    document.getElementById('drawerTitle').textContent = `📦 Chunks — ${label}`;
+    document.getElementById('drawerBody').innerHTML = '<div class="empty-state">Loading…</div>';
+    drawer.classList.add('open');
+    overlay.classList.add('show');
+    try {
+      const res = await fetch(`/chunks?table_id=${encodeURIComponent(tableId)}`);
+      const chunks = await res.json();
+      renderChunks(chunks);
+    } catch (e) {
+      document.getElementById('drawerBody').innerHTML = `<div class="empty-state" style="color:#f87171">Error: ${e.message}</div>`;
+    }
+  }
+
+  function closeChunks() {
+    drawer.classList.remove('open');
+    overlay.classList.remove('show');
+  }
+
+  function renderChunks(chunks) {
+    if (!chunks.length) {
+      document.getElementById('drawerBody').innerHTML = '<div class="empty-state">No chunks found</div>';
+      return;
+    }
+    document.getElementById('drawerBody').innerHTML = chunks.map((c, i) => {
+      const json = {
+        chunk_index: c.chunk_index ?? i,
+        row_index: c.row_index,
+        region_index: c.region_index,
+        row_hash: c.row_hash,
+        chunk_text: c.chunk_text,
+        md_text: c.md_text,
+        ...(c.group_by_column ? { group_by_column: c.group_by_column, group_value: c.group_value } : {}),
+      };
+      return `<div class="chunk-card">
+        <div class="chunk-card-header">Chunk ${json.chunk_index} &nbsp;·&nbsp; row_index: ${json.row_index ?? '—'}</div>
+        <div class="chunk-body">${escHtml(JSON.stringify(json, null, 2))}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+</body>
+</html>
