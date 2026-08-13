@@ -87,13 +87,16 @@ def _find_boundary_rows(sheet: ParsedSheet) -> set[int]:
     return boundaries
 
 
-def _label_above(sheet: ParsedSheet, seg_start: int, boundaries: set[int]) -> str | None:
-    """Extract title text from a boundary row just above a segment."""
+def _label_above(sheet: ParsedSheet, seg_start: int, boundaries: set[int],
+                 start_col: int = 0, end_col: int | None = None) -> str | None:
+    """Extract title text from a boundary row just above a segment, scoped to [start_col:end_col]."""
     if seg_start > 0:
         above = seg_start - 1
         if above in boundaries:
             above_row = sheet.rows[above]
-            text = " ".join(str(c) for c in above_row if c is not None and str(c).strip())
+            ec = end_col if end_col is not None else len(above_row) - 1
+            sliced = above_row[start_col: ec + 1]
+            text = " ".join(str(c) for c in sliced if c is not None and str(c).strip())
             if text:
                 return text.strip()
     return None
@@ -253,7 +256,7 @@ def _split_region_recursive(
             # No column split — this is a leaf region
             cs, ce = col_bands[0]
             if _is_valid_region(grid, rs, re, cs, ce):
-                label = _label_above(sheet, rs, boundaries)
+                label = _label_above(sheet, rs, boundaries, cs, ce)
                 log.debug(
                     "Detected region sheet=%s rows=%d-%d cols=%d-%d label=%s",
                     sheet.sheet_name, rs, re, cs, ce, label,
@@ -272,7 +275,7 @@ def _split_region_recursive(
                 if sub:
                     regions.extend(sub)
                 elif _is_valid_region(grid, rs, re, cs, ce):
-                    label = _label_above(sheet, rs, boundaries)
+                    label = _label_above(sheet, rs, boundaries, cs, ce)
                     log.debug(
                         "Detected region sheet=%s rows=%d-%d cols=%d-%d label=%s",
                         sheet.sheet_name, rs, re, cs, ce, label,
