@@ -291,27 +291,23 @@ def _split_region_recursive(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def _collect_stray_cells(sheet: ParsedSheet, boundaries: set[int], used_rows: set[int]) -> TableRegion | None:
+def _collect_stray_cells(sheet: ParsedSheet, boundaries: set[int], used_rows: set[int]) -> list[TableRegion]:
     """
-    Collect all non-empty, non-boundary rows that contain only scattered single
-    values (not part of a proper table) into one stray notes region.
-    Scans every non-boundary row; skips rows already covered by real table regions.
+    Each non-empty stray row becomes its own TableRegion (one chunk per cell/row).
     """
     rows = sheet.rows
-    stray_texts: list[str] = []
+    result: list[TableRegion] = []
     for i, row in enumerate(rows):
         if i in boundaries or i in used_rows:
             continue
         vals = [str(c).strip() for c in row if c is not None and str(c).strip() and not str(c).startswith("[bg=#")]
         if vals:
-            stray_texts.append(", ".join(vals))
-    if not stray_texts:
-        return None
-    return TableRegion(
-        start_row=0, end_row=0,
-        start_col=0, end_col=0,
-        label="stray_notes: " + " | ".join(stray_texts),
-    )
+            result.append(TableRegion(
+                start_row=i, end_row=i,
+                start_col=0, end_col=0,
+                label="stray_notes: " + ", ".join(vals),
+            ))
+    return result
 
 
 def find_table_regions(sheet: ParsedSheet) -> list[TableRegion]:
@@ -349,9 +345,7 @@ def find_table_regions(sheet: ParsedSheet) -> list[TableRegion]:
             used_rows.update(range(r.start_row, r.end_row + 1))
     used_rows.update(boundaries)
 
-    stray = _collect_stray_cells(sheet, boundaries, used_rows)
-    if stray:
-        regions.append(stray)
+    regions.extend(_collect_stray_cells(sheet, boundaries, used_rows))
 
     return regions
 

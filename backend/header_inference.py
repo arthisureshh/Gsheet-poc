@@ -166,13 +166,9 @@ def _select_header_rows(rows: list[list], header_idx: int) -> tuple[list[list], 
     # Check for duplicate column names (merged cell spans)
     non_empty_base = [v for v in base_normalized if v]
     duplicate_count = len(non_empty_base) - len(set(non_empty_base))
-    base_is_date_band = _looks_like_date_band(base)
-
-    if header_idx + 1 < len(rows):
+    if header_idx + 1 < len(rows) and duplicate_count > 0:
         next_row = rows[header_idx + 1]
-        next_looks_header = _looks_header_like(next_row)
-
-        if (duplicate_count > 0 and next_looks_header) or (base_is_date_band and next_looks_header):
+        if _looks_header_like(next_row):
             return [base, next_row], header_idx + 2
 
     return [base], header_idx + 1

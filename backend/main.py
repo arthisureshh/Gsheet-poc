@@ -16,7 +16,7 @@ from backend.detector import detect_file_type
 from backend.parsers import parse
 from backend.region_detector import find_table_regions
 from backend.header_inference import infer_headers, build_schema
-from backend.indexer import ensure_indices, index_schema, index_chunks, _to_json_val, _compute_diff, DiffBlock
+from backend.indexer import ensure_indices, index_schema, index_chunks, _to_json_val, _compute_diff, DiffBlock, _embed_and_store, _get_stored_blocks, _get_next_chunk_id, _delete_chunks
 from backend.header_inference import row_to_text
 from backend.agents.query_agent import query as agent_query, _fetch_all_schemas
 
@@ -63,26 +63,25 @@ async def upload_file(file: UploadFile = File(...), base_file_id: str = Form(Non
                 # Stray notes region — index label text directly
                 if region.label and region.label.startswith("stray_notes:"):
                     stray_text = region.label[len("stray_notes:"):].strip()
-                    from backend.models import TableSchema, DetectedTable
+                    from backend.models import TableSchema
+                    table_id = f"{file_id}:{sheet.sheet_name}:stray_{region_idx}"
                     schema = TableSchema(
-                        table_id=f"{file_id}:{sheet.sheet_name}:stray",
+                        table_id=table_id,
                         file_id=file_id,
                         table_label="Stray Notes",
                         headers=["note"],
                         column_types={"note": "text"},
                         row_count=1,
                         sample_values={"note": [stray_text[:50]]},
-                        source_range=f"{sheet.sheet_name}!stray",
+                        source_range=f"{sheet.sheet_name}!stray_{region_idx}",
                         file_name=file.filename,
                     )
-                    stray_table = DetectedTable(
-                        header_row_index=0,
-                        headers=["note"],
-                        rows=[[stray_text]],
-                        region=region,
-                    )
                     index_schema(schema)
-                    index_chunks(stray_table, schema)
+                    prev = _get_stored_blocks(table_id)
+                    curr = [DiffBlock(text=stray_text)]
+                    to_index, to_delete = _compute_diff(prev, curr, _get_next_chunk_id(table_id))
+                    _delete_chunks(table_id, to_delete)
+                    _embed_and_store(to_index, schema, sheet.sheet_name)
                     all_schemas.append({
                         "table_id": schema.table_id,
                         "table_label": schema.table_label,
