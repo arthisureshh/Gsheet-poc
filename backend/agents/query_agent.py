@@ -57,17 +57,22 @@ def _keyword_search(query: str, table_id: str) -> list[dict]:
 
 
 def _vector_search(query: str, table_id: str) -> list[dict]:
-    """#6 region-scoped vector search."""
+    from backend.indexer import _ensure_qdrant_collection
+    _ensure_qdrant_collection()
     model = _embed_model()
     vector = model.encode([query])[0].tolist()
     filt = Filter(must=[FieldCondition(key="table_id", match=MatchValue(value=table_id))])
-    results = _qdrant().search(
-        collection_name=QDRANT_COLLECTION,
-        query_vector=vector,
-        query_filter=filt,
-        limit=10,
-    )
-    return [{"chunk_text": r.payload.get("md_text") or r.payload["chunk_text"], "score": r.score} for r in results]
+    try:
+        results = _qdrant().search(
+            collection_name=QDRANT_COLLECTION,
+            query_vector=vector,
+            query_filter=filt,
+            limit=10,
+        )
+    except Exception:
+        _ensure_qdrant_collection()
+        return []
+    return [{"chunk_text": r.payload.get("chunk_text", ""), "score": r.score} for r in results]
 
 
 def _best_schema(schemas: list[dict], q_lower: str) -> dict:

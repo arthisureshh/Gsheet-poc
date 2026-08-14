@@ -291,12 +291,33 @@ def _split_region_recursive(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def _collect_stray_cells(sheet: ParsedSheet, boundaries: set[int], used_rows: set[int]) -> TableRegion | None:
+    """
+    Collect all non-empty, non-boundary rows that contain only scattered single
+    values (not part of a proper table) into one stray notes region.
+    Scans every non-boundary row; skips rows already covered by real table regions.
+    """
+    rows = sheet.rows
+    stray_texts: list[str] = []
+    for i, row in enumerate(rows):
+        if i in boundaries or i in used_rows:
+            continue
+        vals = [str(c).strip() for c in row if c is not None and str(c).strip() and not str(c).startswith("[bg=#")]
+        if vals:
+            stray_texts.append(", ".join(vals))
+    if not stray_texts:
+        return None
+    return TableRegion(
+        start_row=0, end_row=0,
+        start_col=0, end_col=0,
+        label="stray_notes: " + " | ".join(stray_texts),
+    )
+
+
 def find_table_regions(sheet: ParsedSheet) -> list[TableRegion]:
     """
     Phase 1 + Phase 2 region detection.
-
-    If the sheet has a CellGrid (xlsx), uses 2D recursive splitting.
-    Falls back to Phase 1 row-only detection for xls/csv/tsv.
+    Also collects stray single-cell notes outside detected regions.
     """
     if not sheet.rows:
         return []
@@ -315,12 +336,24 @@ def find_table_regions(sheet: ParsedSheet) -> list[TableRegion]:
             end_col=grid.col_count - 1,
             boundaries=boundaries,
         )
-        if regions:
-            return regions
-        # Fall through to Phase 1 if 2D found nothing
+        if not regions:
+            regions = _phase1_regions(sheet, boundaries)
+    else:
+        regions = _phase1_regions(sheet, boundaries)
 
-    # Phase 1 fallback — row-only (xls/csv/tsv or empty grid result)
-    return _phase1_regions(sheet, boundaries)
+    # Only mark rows of proper multi-row tables as used
+    # so micro/single-row regions are still scanned for stray content
+    used_rows: set[int] = set()
+    for r in regions:
+        if r.end_row - r.start_row + 1 > 2:
+            used_rows.update(range(r.start_row, r.end_row + 1))
+    used_rows.update(boundaries)
+
+    stray = _collect_stray_cells(sheet, boundaries, used_rows)
+    if stray:
+        regions.append(stray)
+
+    return regions
 
 
 def _phase1_regions(sheet: ParsedSheet, boundaries: set[int]) -> list[TableRegion]:

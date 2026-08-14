@@ -287,6 +287,12 @@ def infer_headers(region: TableRegion, sheet: ParsedSheet) -> DetectedTable:
     display_names, normalized_keys = _build_headers(header_row_list, max_cols)
 
     data_rows = rows[data_start:]
+    # Stray/micro region: if header consumed all rows, treat header row as data
+    if not data_rows and header_row_list:
+        data_rows = header_row_list[:1]
+        header_row_list = []
+        display_names = [f"col_{i}" for i in range(max_cols)]
+        normalized_keys = display_names
     return DetectedTable(
         header_row_index=header_idx,
         headers=normalized_keys,

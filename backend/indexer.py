@@ -207,9 +207,12 @@ def _get_next_chunk_id(table_id: str) -> int:
 def _ensure_qdrant_collection():
     """Recreate Qdrant collection if missing — called before any read/write."""
     qd = _qdrant()
-    existing = [c.name for c in qd.get_collections().collections]
-    if QDRANT_COLLECTION not in existing:
-        qd.create_collection(QDRANT_COLLECTION, vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE))
+    try:
+        existing = [c.name for c in qd.get_collections().collections]
+        if QDRANT_COLLECTION not in existing:
+            qd.create_collection(QDRANT_COLLECTION, vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE))
+    except Exception:
+        pass
 
 
 # ── Delete chunks by chunk_id ─────────────────────────────────────────────────
@@ -217,8 +220,7 @@ def _ensure_qdrant_collection():
 def _delete_chunks(table_id: str, chunk_ids: list[int]):
     if not chunk_ids:
         return
-    _ensure_qdrant_collection()
-    # ES: delete all matching chunk_ids in one query
+    # ES delete
     _es().delete_by_query(
         index=ES_CHUNK_INDEX,
         query={"bool": {"must": [
@@ -227,14 +229,17 @@ def _delete_chunks(table_id: str, chunk_ids: list[int]):
         ]}},
         refresh=True,
     )
-    # Qdrant: batch delete all chunk_ids in one filter using should
-    _qdrant().delete(
-        collection_name=QDRANT_COLLECTION,
-        points_selector=Filter(
-            must=[FieldCondition(key="table_id", match=MatchValue(value=str(table_id)))],
-            should=[FieldCondition(key="chunk_id", match=MatchValue(value=int(cid))) for cid in chunk_ids],
-        ),
-    )
+    # Qdrant delete — only if collection exists
+    try:
+        _qdrant().delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=Filter(
+                must=[FieldCondition(key="table_id", match=MatchValue(value=str(table_id)))],
+                should=[FieldCondition(key="chunk_id", match=MatchValue(value=int(cid))) for cid in chunk_ids],
+            ),
+        )
+    except Exception:
+        pass
 
 
 # ── Embed + store new chunks ──────────────────────────────────────────────────
@@ -246,7 +251,8 @@ def _embed_and_store(to_index: list[tuple[int, str]], schema: TableSchema, sheet
     es = _es()
     qd = _qdrant()
     model = _embed_model()
-    region_idx = int(schema.table_id.split(":")[-1])
+    region_idx_str = schema.table_id.split(":")[-1]
+    region_idx = int(region_idx_str) if region_idx_str.isdigit() else 0
 
     texts = [ct for _, ct in to_index]
     vectors = []

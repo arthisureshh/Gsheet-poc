@@ -60,8 +60,42 @@ async def upload_file(file: UploadFile = File(...), base_file_id: str = Form(Non
                 regions = [TableRegion(0, len(sheet.rows) - 1, 0, max(sheet.max_col - 1, 0))]
 
             for region_idx, region in enumerate(regions):
+                # Stray notes region — index label text directly
+                if region.label and region.label.startswith("stray_notes:"):
+                    stray_text = region.label[len("stray_notes:"):].strip()
+                    from backend.models import TableSchema, DetectedTable
+                    schema = TableSchema(
+                        table_id=f"{file_id}:{sheet.sheet_name}:stray",
+                        file_id=file_id,
+                        table_label="Stray Notes",
+                        headers=["note"],
+                        column_types={"note": "text"},
+                        row_count=1,
+                        sample_values={"note": [stray_text[:50]]},
+                        source_range=f"{sheet.sheet_name}!stray",
+                        file_name=file.filename,
+                    )
+                    stray_table = DetectedTable(
+                        header_row_index=0,
+                        headers=["note"],
+                        rows=[[stray_text]],
+                        region=region,
+                    )
+                    index_schema(schema)
+                    index_chunks(stray_table, schema)
+                    all_schemas.append({
+                        "table_id": schema.table_id,
+                        "table_label": schema.table_label,
+                        "sheet_name": sheet.sheet_name,
+                        "headers": schema.headers,
+                        "column_types": schema.column_types,
+                        "row_count": schema.row_count,
+                        "sample_values": {"note": [stray_text[:50]]},
+                        "source_range": schema.source_range,
+                    })
+                    continue
                 table = infer_headers(region, sheet)
-                if not table.headers or not table.rows:
+                if not table.rows:
                     continue
                 schema = build_schema(table, sheet.sheet_name, region_idx, file.filename, file_id)
                 index_schema(schema)
@@ -136,7 +170,7 @@ def _parse_file_to_tables(tmp_path: str, file_type: str, filename: str, file_id:
             regions = [TableRegion(0, len(sheet.rows) - 1, 0, max(sheet.max_col - 1, 0))]
         for region_idx, region in enumerate(regions):
             table = infer_headers(region, sheet)
-            if not table.headers or not table.rows:
+            if not table.rows:
                 continue
             schema = build_schema(table, sheet.sheet_name, region_idx, filename, file_id)
             texts = [tx for row in table.rows if (tx := row_to_text(row, schema.headers))]
